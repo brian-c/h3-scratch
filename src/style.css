@@ -1,0 +1,15 @@
+html {
+	display: flex;
+	font-family: sans-serif;
+	min-height: 100%;
+}
+
+body {
+	display: flex;
+	flex-direction: column;
+	flex-grow: 1;
+}
+
+#map {
+	flex-grow: 1;
+}
