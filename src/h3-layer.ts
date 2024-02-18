@@ -1,5 +1,6 @@
 import * as turf from '@turf/turf';
 import geojson2h3 from 'geojson2h3';
+import { polygonToCells } from 'h3-js';
 
 const MAX_MAP_ZOOM = 22
 const MAX_H3_RESOLUTION = 15;
@@ -8,14 +9,24 @@ let layerIdCounter = 0;
 let cellIdCounter = 0;
 
 export default class H3Layer {
-	#id = layerIdCounter++ % Number.MAX_SAFE_INTEGER;
-	#map: maplibregl.Map | null = null;
+	#id = layerIdCounter++;
+	protected map: maplibregl.Map | null = null;
 	#hoveredFeatureId: GeoJSON.Feature['id'] | null = null;
+	protected h3Resolution = 0;
+	protected topLayerId: string | undefined;
+
+	get source() {
+		return this.map?.getSource(`h3-grid-${this.#id}`) as maplibregl.GeoJSONSource | undefined;
+	}
+
+	get fillLayer() {
+		return this.map?.getLayer(`h3-grid-fill-${this.#id}`);
+	}
 
 	addTo(map: maplibregl.Map, topLayerId?: string) {
-		this.#map = map;
+		this.map = map;
 
-		topLayerId ??= map.getStyle().layers.find(layer => layer.type === 'symbol')?.id;
+		this.topLayerId = topLayerId ?? map.getStyle().layers.find(layer => layer.type === 'symbol')?.id;
 
 		map.addSource(`h3-grid-${this.#id}`, { type: 'geojson', data: turf.featureCollection([]) });
 
@@ -26,41 +37,41 @@ export default class H3Layer {
 			paint: {
 				'fill-color': 'transparent',
 			},
-		}, topLayerId);
+		}, this.topLayerId);
 
 		map.addLayer({
 			id: `h3-grid-lines-${this.#id}`,
 			type: 'line',
 			source: `h3-grid-${this.#id}`,
 			paint: {
-				'line-color': ['case', ['has', 'crossesAntimeridian'], 'red', 'gray'],
+				'line-color': ['case', ['has', 'crossesAntimeridian'], 'red', '#8884'],
 				'line-opacity': 1,
 				'line-width': ['case', ['boolean', ['feature-state', 'hovered'], false], 2, 0.4],
 			},
 			filter: ['!', ['has', 'closeToPole']],
-		}, topLayerId);
+		}, this.topLayerId);
 
 		map.on('remove', this.remove);
 		map.on('move', this.#handleMapMove);
 		map.on('mousemove', `h3-grid-fill-${this.#id}`, this.#handleCellMove);
 		map.on('mouseleave', `h3-grid-fill-${this.#id}`, this.#handleCellLeave);
 
-		this.#refreshGrid();
+		this.redraw();
 	}
 
 	remove() {
-		if (!this.#map) return;
-		this.#map.removeLayer(`h3-grid-lines-${this.#id}`);
-		this.#map.removeLayer(`h3-grid-fill-${this.#id}`);
-		this.#map.removeSource(`h3-grid-${this.#id}`);
-		this.#map = null;
+		if (!this.map) return;
+		this.map.removeLayer(`h3-grid-lines-${this.#id}`);
+		this.map.removeLayer(`h3-grid-fill-${this.#id}`);
+		this.map.removeSource(`h3-grid-${this.#id}`);
+		this.map = null;
 	}
 
 	on<E extends keyof maplibregl.MapLayerEventType>(
 		event: E,
 		callback: (event: maplibregl.MapLayerEventType[E], cellId: string) => void,
 	) {
-		const map = this.#map;
+		const map = this.map;
 		if (!map) return;
 
 		function handler(event: maplibregl.MapLayerEventType[E]) {
@@ -72,26 +83,24 @@ export default class H3Layer {
 	}
 
 	#handleCellMove = (event: maplibregl.MapLayerEventType['mousemove']) => {
-		if (!this.#map) return;
+		if (!this.map) return;
 		const feature = event.features?.[0];
 		if (this.#hoveredFeatureId && this.#hoveredFeatureId !== feature?.id) {
-			this.#map.setFeatureState({ source: `h3-grid-${this.#id}`, id: this.#hoveredFeatureId }, { hovered: false });
+			this.map.setFeatureState({ source: `h3-grid-${this.#id}`, id: this.#hoveredFeatureId }, { hovered: false });
 			this.#hoveredFeatureId = undefined;
 		}
 		if (!this.#hoveredFeatureId) {
 			if (feature) {
 				this.#hoveredFeatureId = feature.id;
-				this.#map.getCanvas().style.cursor = 'pointer';
-				this.#map.setFeatureState({ source: `h3-grid-${this.#id}`, id: this.#hoveredFeatureId }, { hovered: true });
+				this.map.setFeatureState({ source: `h3-grid-${this.#id}`, id: this.#hoveredFeatureId }, { hovered: true });
 			}
 		}
 	};
 
 	#handleCellLeave = () => {
-		if (!this.#map) return;
-		this.#map.getCanvas().style.cursor = '';
+		if (!this.map) return;
 		if (this.#hoveredFeatureId) {
-			this.#map.setFeatureState({ source: `h3-grid-${this.#id}`, id: this.#hoveredFeatureId }, { hovered: false });
+			this.map.setFeatureState({ source: `h3-grid-${this.#id}`, id: this.#hoveredFeatureId }, { hovered: false });
 		}
 	};
 
@@ -107,26 +116,24 @@ export default class H3Layer {
 				this.#moveThrottle = 'no';
 				this.#moveFinishTimeout = setTimeout(() => {
 					this.#moveThrottle = 'finishing';
-					// console.log('Finishing');
 					this.#handleMapMove(event);
 					this.#moveThrottle = 'no';
 				}, 100);
 			}, 500);
 		}
 
-		// console.log('Step');
-		if (!this.#map || event.originalEvent?.altKey) return;
-		this.#refreshGrid();
+		if (!this.map || event.originalEvent?.altKey) return;
+		this.redraw();
 	};
 
-	#refreshGrid() {
-		if (!this.#map) return;
-		const view = this.#getAreaInView(this.#map);
-		const zoom = this.#map.getZoom();
+	redraw() {
+		if (!this.map) return;
+		const view = this.#getAreaInView(this.map);
+		const zoom = this.map.getZoom();
 		const chunkSize = this.#getChunkSize(view);
 		const chunks = this.#getChunks(view);
 		const grid = this.#getGrid(chunks, chunkSize, zoom);
-		(this.#map.getSource(`h3-grid-${this.#id}`) as maplibregl.GeoJSONSource).setData(grid);
+		(this.map.getSource(`h3-grid-${this.#id}`) as maplibregl.GeoJSONSource).setData(grid);
 	}
 
 	#getAreaInView(map: maplibregl.Map) {
@@ -171,28 +178,30 @@ export default class H3Layer {
 	}
 
 	#getGrid(chunks: GeoJSON.FeatureCollection<GeoJSON.Polygon>, chunkSize: number, zoom: number) {
-		const resolution = Math.round(Math.max(zoom, 0) / MAX_MAP_ZOOM * MAX_H3_RESOLUTION);
+		this.h3Resolution = Math.round(Math.max(zoom, 0) / MAX_MAP_ZOOM * MAX_H3_RESOLUTION);
 		const hexagonIds = new Set<string>();
 
 		chunks.features.forEach(chunk => {
 			const bigChunk = turf.buffer(chunk, chunkSize, { units: 'degrees' });
 			bigChunk.properties ??= {};
-			const cellIds = geojson2h3.featureToH3Set(bigChunk, resolution);
+			const cellIds = polygonToCells(bigChunk.geometry.coordinates, this.h3Resolution, true);
 			cellIds.forEach(id => hexagonIds.add(id));
 		});
 
-		const grid = geojson2h3.h3SetToFeatureCollection(Array.from(hexagonIds), id => ({ id })) as GeoJSON.FeatureCollection<GeoJSON.Polygon>;
+		const grid = geojson2h3.h3SetToFeatureCollection(Array.from(hexagonIds), id => ({
+			id,
+		})) as GeoJSON.FeatureCollection<GeoJSON.Polygon>;
 
 		grid.features.forEach(cell => {
-			cell.id = cellIdCounter++ % Number.MAX_SAFE_INTEGER;
-			this.#modifyToIndicateCloseToPole(cell);
-			this.#modifyToRespectAntimeridian(cell);
+			cell.id = cellIdCounter++;
+			this.modifyToIndicateCloseToPole(cell);
+			this.modifyToRespectAntimeridian(cell);
 		});
 
 		return grid;
 	}
 
-	#modifyToIndicateCloseToPole(feature: GeoJSON.Feature<GeoJSON.Polygon>) {
+	protected modifyToIndicateCloseToPole(feature: GeoJSON.Feature<GeoJSON.Polygon>) {
 		const CLOSE_TO_POLE = 85;
 		turf.coordEach(feature, currentCoord => {
 			if (Math.abs(currentCoord[1]) > CLOSE_TO_POLE) {
@@ -202,7 +211,7 @@ export default class H3Layer {
 		});
 	}
 
-	#modifyToRespectAntimeridian(feature: GeoJSON.Feature<GeoJSON.Polygon>) {
+	protected modifyToRespectAntimeridian(feature: GeoJSON.Feature<GeoJSON.Polygon>) {
 		let previousCoord: GeoJSON.Point['coordinates'] | null = null;
 		turf.coordEach(feature, currentCoord => {
 			const onTheAntimeridianSide = Math.abs(currentCoord[0]) > 90;

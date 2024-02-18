@@ -1,7 +1,7 @@
 import MapLibreGL from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './style.css';
-import H3Layer from './h3-layer';
+import H3SeletionLayer from './h3-selection-layer';
 
 const MAPTILER_API_KEY = import.meta.env.VITE_MAPTILER_API_KEY;
 
@@ -18,9 +18,11 @@ const map = new MapLibreGL.Map({
 
 map.on('load', () => {
 	const topLayerId = 'boundary_country_outline';
-
-	const h3Layer = new H3Layer();
+	const h3Layer = new H3SeletionLayer();
+	Object.assign(globalThis, { h3Layer });
 	h3Layer.addTo(map, topLayerId);
+	// h3Layer.onInput((...args: unknown[]) => console.info('INPUT', ...args));
+	// h3Layer.onChange((...args: unknown[]) => console.info('CHANGE', ...args));
 });
 
 map.on('move', () => {
